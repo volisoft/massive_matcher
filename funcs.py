@@ -119,6 +119,20 @@ def while_(string, fun):
         prev_index, prev_char = i, c
 
 
+def find_by_predicate(str_, predicate):
+    for i, c in enumerate(str_):
+        if predicate(c):
+            return i, c
+    return None, None
+
+
+def rfind_by_predicate(str_, predicate):
+    for i, c in enumerate(reversed(str_)):
+        if predicate(c):
+            return i, c
+    return None, None
+
+
 def parse_build_num_suffix(string):
     # potential_bld_alpha_idx, c = while_(string, lambda cur: cur is ' ' or cur.isalpha())
     suffix = re.search('[\d\w]{1,3}', string)
@@ -135,25 +149,89 @@ def is_multiple_apt(addr):
     return len(DIGIT_GROUPS.findall(apt)) > 1
 
 
+def is_multi_delimited_string(str_, delimiters):
+    delims = []
+    for d in delimiters:
+        if d in str_:
+            delims.append(d)
+
+    return len(delims) > 1, delims
+
+
+def find_suffix_delimiter(apt_part, delim_candidates):
+    suffix_delimiter = None
+    # find non apt delimiter, eg 23-a or 23/a
+    alpha_index, alpha = find_by_predicate(apt_part, lambda x: x.isalpha())
+    digit_index, digit = rfind_by_predicate(apt_part[:alpha_index], lambda x: x.isdigit())
+    # treat delimiter between digit and character as non apt delimiter
+    for delim_candidate in delim_candidates:
+        if delim_candidate in apt_part[digit_index: alpha_index]:
+            suffix_delimiter = delim_candidate
+
+    return suffix_delimiter
+
+
 def parse_apt(addr, potential_apt):
-    apt_num_search = re.search('\d+', potential_apt)
     apts = '<error>'
-    apt_group_start = addr.rfind(potential_apt)
+    apt_group_start = len(addr)
+    apt_num_search = re.search('\d+', potential_apt)
     if apt_num_search:
+        apt_group_start = addr.rfind(potential_apt)
         apt_start = apt_num_search.start()
         apt_part = potential_apt[apt_start:]
-        apts = re.findall('[\d\-\w]{1,5}', apt_part)
+
+        apt_delimiter, suffix_delimiter = None, None
+        possible_delimiters = [',', ';', '/', '\\', '-']
+        is_multi_delim, delim_candidates = is_multi_delimited_string(apt_part, possible_delimiters)
+
+        if is_multi_delim:
+            suffix_delimiter = find_suffix_delimiter(apt_part, delim_candidates)
+        if suffix_delimiter:
+            delim_candidates.remove(suffix_delimiter)
+        apt_delimiter = delim_candidates[0] if len(delim_candidates) > 0 else None
+
+        if apt_delimiter:
+            apt_groups = apt_part.split(apt_delimiter)
+            trans_table = str.maketrans('()', '  ')
+            apts = [apt.translate(trans_table) for apt in apt_groups]
+        else:
+            apts = re.findall('[\d\-\w]{1,5}', apt_part)
 
     return apts, apt_group_start
 
 
 def find_groups(addr):
-    search = re.search('кв', addr)
-    if not search:
-        return DIGIT_GROUPS.findall(addr)
+    prefix = addr
+    possible_delimiters = [',', '/', '\\', ';']
+    is_multi_delim, potential_delims = is_multi_delimited_string(prefix, possible_delimiters)
+    scores = {}
+    if ',' in potential_delims:
+        scores = {',': 1}
 
-    prefix, apt = addr[: search.start()], addr[search.start():]
-    return DIGIT_GROUPS.findall(prefix) + [apt]
+    apt = None
+    search = re.search('кв', addr)
+    if search:
+        prefix, apt = addr[: search.start()], addr[search.start():]
+        position, delim = rfind_by_predicate(prefix, lambda x: not x.isdigit() and x in possible_delimiters)
+        if not delim:
+            position, delim = rfind_by_predicate(prefix, lambda x: not x.isdigit() and x == ' ')
+        prefix = prefix[: -(position + 1)]
+
+        if delim not in scores:
+            scores[delim] = 1
+        else:
+            scores[delim] += 1
+
+    for d in potential_delims:
+        scores.setdefault(d, prefix.count(d)) + prefix.count(d)
+
+    delimiter = max(scores, key=scores.get)
+    delimited_groups = prefix.split(delimiter)
+    numeric_groups = DIGIT_GROUPS.findall(prefix)
+    groups = delimited_groups if len(delimited_groups) < len(numeric_groups) else numeric_groups
+    if apt:
+        groups.append(apt)
+    return groups
 
     # tuple_ = addr.split('кв')
     #
@@ -180,14 +258,21 @@ def parse_build_number(addr='23  -d/12, кв.11'):
         return '<ambiguous address'
 
     if complexity == 4:
-        (parsed.build, build_suffix, corpus, apt) = num_groups
+        (build_num, build_suffix, corpus, apt) = num_groups
         # parse apt
         parsed.apt, rend = parse_apt(addr, apt)
 
-        # parse building numer
+        # parse building number
         tail = addr[: rend]
-        build_num_start = tail.find(parsed.build)
-        parsed.build_suffix = parse_build_num_suffix(tail[build_num_start + len(parsed.build):])
+        build_num_start = tail.find(build_num)
+        corpus_start = tail.rfind(corpus)
+
+        parsed.build = build_num
+        parsed.build_suffix = parse_build_num_suffix(tail[build_num_start + len(build_num):])
+
+        # parse corpus
+        tail = tail[corpus_start:]
+        parsed.corpus = re.search(r'[\d\w]{1,3}', tail).group(0)
         return parsed
 
     if complexity == 3:
@@ -198,14 +283,16 @@ def parse_build_number(addr='23  -d/12, кв.11'):
         # parse building number
         tail = addr[: rend]
         build_num_start = tail.find(build_num)
-        build_num_end = tail.find(corpus)
+        corpus_start = tail.rfind(corpus)
+        suffix = tail[build_num_start + len(build_num): corpus_start]
 
-        suffix = parse_build_num_suffix(tail[build_num_start + len(build_num): build_num_end])
-        parsed.build = '-'.join(filter(None, (build_num, suffix)))
+        parsed.build = build_num
+        parsed.build_suffix = parse_build_num_suffix(suffix)
 
         # parse corpus
-        tail = tail[build_num_end:]
-        parsed.corpus = re.search(r'[\d\w]{1,3}', tail).group(0)
+        tail = addr[corpus_start: rend]
+        match = re.match('[\d\w]{1,3}', tail)
+        parsed.corpus = match.group(0) if match else None
         return parsed
 
     if complexity == 2:
@@ -216,64 +303,85 @@ def parse_build_number(addr='23  -d/12, кв.11'):
         # parse building number
         tail = addr[: rend]
         build_num_start = tail.find(build_num)
-        build_num_end = tail.find(apt)
 
-        suffix = parse_build_num_suffix(tail[build_num_start + len(build_num): build_num_end])
-        parsed.build = '-'.join(filter(None, (build_num, suffix)))
+        parsed.build = build_num
+        parsed.build_suffix = parse_build_num_suffix(tail[build_num_start + len(build_num):])
 
         return parsed
 
 
         # if complexity == 1:
-    #     build_num_start = addr.find(build_num)
-    #     build_num_end = rend
-    #     tail = addr[build_num_start + len(build_num): build_num_end]
-    #     build_num += parse_build_num_suffix(tail)
-    #
-    # if corpus:
-    #     build_num_end = addr.find(corpus)
+        #     build_num_start = addr.find(build_num)
+        #     corpus_start = rend
+        #     tail = addr[build_num_start + len(build_num): corpus_start]
+        #     build_num += parse_build_num_suffix(tail)
+        #
+        # if corpus:
+        #     corpus_start = addr.find(corpus)
 
-    # tail = addr[build_num_start + len(build_num): build_num_end]
-    # build_parsed = build_num + parse_build_num_suffix(tail)
-    #
-    # build_num_start, c = next_(addr, str.isdigit)
-    # # is next is end of string  == build number found, return
-    # # is next is alpha -> move until not digit
-    # #     is next is digit or separator  == end of potential build
-    # #     is next is alpha -> move until digit or separator == end of potential build
-    #
-    # build_num_end, c = while_(addr, str.isdigit)
-    # build_num = addr[build_num_start:build_num_end + 1]
-    #
-    # if build_num_end + 1 > end:
-    #     return build_num
-    #
-    # rest = addr[build_num_end + 1:]
-    #
-    # second_part_start, c = next_(rest, str.isdigit)
-    # potential_build_alpha, second_part = rest[:second_part_start], rest[second_part_start:]
-    # build_num += parse_build_num_suffix(potential_build_alpha)
-    #
-    # return build_parsed
+        # tail = addr[build_num_start + len(build_num): corpus_start]
+        # build_parsed = build_num + parse_build_num_suffix(tail)
+        #
+        # build_num_start, c = next_(addr, str.isdigit)
+        # # is next is end of string  == build number found, return
+        # # is next is alpha -> move until not digit
+        # #     is next is digit or separator  == end of potential build
+        # #     is next is alpha -> move until digit or separator == end of potential build
+        #
+        # corpus_start, c = while_(addr, str.isdigit)
+        # build_num = addr[build_num_start:corpus_start + 1]
+        #
+        # if corpus_start + 1 > end:
+        #     return build_num
+        #
+        # rest = addr[corpus_start + 1:]
+        #
+        # second_part_start, c = next_(rest, str.isdigit)
+        # potential_build_alpha, second_part = rest[:second_part_start], rest[second_part_start:]
+        # build_num += parse_build_num_suffix(potential_build_alpha)
+        #
+        # return build_parsed
 
 
 import time
+
 samples = [
-    ', 22, корп.7, кв.61', '23  -3d/12, кв.11;12-2', '19а, кв.115', '2, кв. 10-а', '8, кв.267',
-    '101, кв.906', '40а, кв. 6', '9а, кв.24', '105, кв. 44', '8, кв. 543', '28в, кв.102',
-    '6, кв. 271)', '80, кв. 406', ', 106, кв.1', '112, кв. 47', ', 22, корп.7, кв.61',
+    '3/4/5',
+    '18, кв.205-206-207', '18, кв.207,206,205',
+    '18, кв 211-212-213', '18, кв 311,316,318',
+    '18, кв.701,707,709,711,721,7', '18, кв.901-907-909-911-921-923', '9, кв.88,89,90',
+    '5/7, кв.5/1',
+    '16/18, кв.3/4', '16/18, кв.1,2', '75а, корп.3, кв.6,7', '1, кв.24,25,26',
+    '122, кв.5,7,8', '8, корп.2, кв.15,16', '4гурт, кв.141,517,518', '4гурт, кв.517,518,141',
+    '7, кв.1,2,3,4', '7, кв.1/2/3/4', '5, кв.1/2/3',
+    ', 22, корп.7), кв.61)',
+    '19а, кв.115',
+    '2, кв. 10-а', '8, кв.267',
+    ', 22, корп.7, кв.61',
     '18, кв. 1а)',
     '60, кв. 259)',
-    '83, корп.3, кв.56', '37, кв. 167', '38 кв 180', '6, кв. 104', '16, кв.433',
+    '83, корп.3, кв.56',
+    '38 кв 180',
     '122/148', '164а, кв. 37', '97а/51', ', буд. 57, кв. 154', '20б, кв.77', ', 3, кв.159',
-    '60, кв. 65', '5т, кв. 89', '63, кв. 71', '164а, кв. 110', '34а, кв.7', ', 51, корп.3, кв.86',
+    ', 51, корп.3, кв.86',
     '70б, кв.52', '73, кв.110', '77, кв.48', '46, кв. 441', '127а/68',
-    ]
+]
 
-start = time.clock()
-for s in samples:
-    address = parse_build_number(s)
-    print(str(s) + ' ->> ' + str(address))
+# start = time.clock()
+# for s in samples:
+#     address = parse_build_number(s)
+#     print(str(s) + ' ->> ' + str(address))
+#
+# print('time: ' + str(time.clock() - start))
+# print('sample size: ' + str(len(samples)))
 
-print('time: ' + str(time.clock() - start))
-print('sample size: ' + str(len(samples)))
+
+def test():
+    d = {'18, кв.205-206-207': "18, #['205', '206', '207']",
+         '18, кв.207,206,205': "18, #['207', '206', '205']"}
+    for k in d:
+        expected = d[k]
+        actual = parse_build_number(k)
+        if not actual.__eq__(expected):
+            print('actual: ' + str(actual) + ', expected:  ' + expected)
+            raise Exception
