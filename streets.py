@@ -101,7 +101,10 @@ class AddressParser(object):
         if street_name in self.street_names_cache:
             return self.street_names_cache[street_name]
 
-        matched_street_name = self.street_name_ngrams.search(street_name)[0]
+        matched_street_name = '', 0
+        result = self.street_name_ngrams.search(street_name)
+        if len(result) > 0:
+            matched_street_name = result[0]
         self.street_names_cache[street_name] = matched_street_name
         return matched_street_name
 
