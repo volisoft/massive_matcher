@@ -3,6 +3,7 @@ __author__ = 'piligrim'
 import re
 from phonenumbers import *
 import pandas as pd
+import numpy as np
 
 
 # accepts lower case addresses
@@ -88,6 +89,20 @@ class AddressNumber:
         self.corpus = None
         self.apt = None
 
+    def build_str(self):
+        suffix = ''
+        if self.build_suffix:
+            suffix = '-' + self.build_suffix
+        if self.corpus:
+            suffix += '/' + self.corpus
+        return self.build + suffix
+
+    def apt_str(self):
+        suffix = None
+        if self.apt:
+            suffix = ','.join(self.apt)
+        return suffix
+
     def __str__(self, *args, **kwargs):
         suffix = ''
         if self.build_suffix:
@@ -103,7 +118,11 @@ SEP = ['/', '\\', '-', ' ', ',']
 APT_SEP_REGEX = '[,;\s]'
 SEP_SPLIT_REGEX = '[%s]*' % ''.join(['/', '\\', '-', ','])
 DIGIT_GROUPS = re.compile('\d+')
+NON_DECIMAL_RE = re.compile(r'[^\d]+')
 
+
+def only_digits(str_):
+    return NON_DECIMAL_RE.sub('', str_)
 
 def next_(string, fun):
     for i, c in enumerate(string):
@@ -202,6 +221,9 @@ def parse_apt(addr, potential_apt):
 
 def find_groups(addr):
     prefix = addr
+    numeric_groups = DIGIT_GROUPS.findall(prefix)
+    if len(numeric_groups) <= 1:
+        return numeric_groups
     possible_delimiters = [',', '/', '\\', ';']
     is_multi_delim, potential_delims = is_multi_delimited_string(prefix, possible_delimiters)
     scores = {}
@@ -215,7 +237,9 @@ def find_groups(addr):
         position, delim = rfind_by_predicate(prefix, lambda x: not x.isdigit() and x in possible_delimiters)
         if not delim:
             position, delim = rfind_by_predicate(prefix, lambda x: not x.isdigit() and x == ' ')
-        prefix = prefix[: -(position + 1)]
+        if position:
+            prefix = prefix[: -(position + 1)]
+        numeric_groups = DIGIT_GROUPS.findall(prefix)
 
         if delim not in scores:
             scores[delim] = 1
@@ -225,10 +249,20 @@ def find_groups(addr):
     for d in potential_delims:
         scores.setdefault(d, prefix.count(d)) + prefix.count(d)
 
-    delimiter = max(scores, key=scores.get)
-    delimited_groups = prefix.split(delimiter)
-    numeric_groups = DIGIT_GROUPS.findall(prefix)
-    groups = delimited_groups if len(delimited_groups) < len(numeric_groups) else numeric_groups
+    delimited_groups = []
+    if len(scores) > 0:
+        delimiter = max(scores, key=scores.get)
+        prefix = prefix.strip(delimiter)
+        delimited_groups = prefix.split(delimiter)
+    delimited_group_length = len(delimited_groups)
+    numeric_group_length = len(numeric_groups)
+    if apt:
+        numeric_group_length += 1
+    groups = delimited_groups if delimited_group_length > 0 and delimited_group_length < numeric_group_length else numeric_groups
+    if len(groups) > 0:
+        build = only_digits(groups[0])
+        groups[0] = build
+
     if apt:
         groups.append(apt)
     return groups
@@ -245,17 +279,40 @@ def find_groups(addr):
     # return DIGIT_GROUPS.findall(prefix) + [apt]
 
 
-def parse_build_number(addr='23  -d/12, кв.11'):
-    rend = end = len(addr) - 1
-    num_groups = find_groups(addr)
+def format_(address):
+    return address.build_str(), address.apt_str()
+
+
+def parse_build_group(addr, build_group, rend, parsed):
+    tail = addr[: rend]
+    build_num_start = tail.find(build_group)
+
+    parsed.build = only_digits(build_group)
+    parsed.build_suffix = parse_build_num_suffix(tail[build_num_start + len(parsed.build):])
+
+
+def parse_build_number(addr):
     parsed = AddressNumber(addr)
+    if not addr or (isinstance(addr, np.float) and np.isnan(addr)):
+        return format_(parsed)
+
+    if not isinstance(addr, str):
+        addr = str(addr)
+
+    rend = end = len(addr)
+    num_groups = find_groups(addr)
 
     if not num_groups:
-        return parsed
+        return format_(parsed)
 
     complexity = len(num_groups)
+    if complexity == 1:
+        build_num, build_num_start = parse_apt(addr, addr)
+        parse_build_group(addr, build_num[0], rend, parsed)
+        return format_(parsed)
+
     if complexity > 4:  # or is_multiple_apt(addr)
-        return '<ambiguous address'
+        return '<ambiguous address>', '<ambiguous address>'
 
     if complexity == 4:
         (build_num, build_suffix, corpus, apt) = num_groups
@@ -264,16 +321,16 @@ def parse_build_number(addr='23  -d/12, кв.11'):
 
         # parse building number
         tail = addr[: rend]
-        build_num_start = tail.find(build_num)
-        corpus_start = tail.rfind(corpus)
-
-        parsed.build = build_num
-        parsed.build_suffix = parse_build_num_suffix(tail[build_num_start + len(build_num):])
+        # build_num_start = tail.find(build_num)
+        # parsed.build = only_digits(build_num)
+        # parsed.build_suffix = parse_build_num_suffix(tail[build_num_start + len(build_num):])
+        parse_build_group(addr, build_num, rend, parsed)
 
         # parse corpus
+        corpus_start = tail.rfind(corpus)
         tail = tail[corpus_start:]
-        parsed.corpus = re.search(r'[\d\w]{1,3}', tail).group(0)
-        return parsed
+        parsed.corpus = re.search('[\d\w]{1,3}', tail).group(0)
+        return format_(parsed)
 
     if complexity == 3:
         (build_num, corpus, apt) = num_groups
@@ -291,9 +348,9 @@ def parse_build_number(addr='23  -d/12, кв.11'):
 
         # parse corpus
         tail = addr[corpus_start: rend]
-        match = re.match('[\d\w]{1,3}', tail)
+        match = re.search(r'[\d]{1,2}[\s\w\-]{0,2}', tail)
         parsed.corpus = match.group(0) if match else None
-        return parsed
+        return format_(parsed)
 
     if complexity == 2:
         (build_num, apt) = num_groups
@@ -307,7 +364,7 @@ def parse_build_number(addr='23  -d/12, кв.11'):
         parsed.build = build_num
         parsed.build_suffix = parse_build_num_suffix(tail[build_num_start + len(build_num):])
 
-        return parsed
+        return format_(parsed)
 
 
         # if complexity == 1:
@@ -346,15 +403,20 @@ def parse_build_number(addr='23  -d/12, кв.11'):
 import time
 
 samples = [
-    '3/4/5',
-    '18, кв.205-206-207', '18, кв.207,206,205',
-    '18, кв 211-212-213', '18, кв 311,316,318',
-    '18, кв.701,707,709,711,721,7', '18, кв.901-907-909-911-921-923', '9, кв.88,89,90',
-    '5/7, кв.5/1',
-    '16/18, кв.3/4', '16/18, кв.1,2', '75а, корп.3, кв.6,7', '1, кв.24,25,26',
-    '122, кв.5,7,8', '8, корп.2, кв.15,16', '4гурт, кв.141,517,518', '4гурт, кв.517,518,141',
-    '7, кв.1,2,3,4', '7, кв.1/2/3/4', '5, кв.1/2/3',
-    ', 22, корп.7), кв.61)',
+    '27кв 92',
+    # ' д.130., кв., 3',
+    '73 кор 6 кв 55',
+    # '10a', '3/4/5',
+    # '5, кв.1/2/3',
+    # ', 22, корп.7), кв.61)',
+    # '18, кв.205-206-207', '18, кв.207,206,205',
+    # '18, кв 211-212-213', '18, кв 311,316,318',
+    # '18, кв.701,707,709,711,721,7', '18, кв.901-907-909-911-921-923', '9, кв.88,89,90',
+    # '5/7, кв.5/1',
+    # '16/18, кв.3/4', '16/18, кв.1,2', '75а, корп.3, кв.6,7', '1, кв.24,25,26',
+    # '122, кв.5,7,8', '8, корп.2, кв.15,16',
+    '4гурт, кв.141,517,518', '4гурт, кв.517,518,141',
+    '7, кв.1,2,3,4', '7, кв.1/2/3/4',
     '19а, кв.115',
     '2, кв. 10-а', '8, кв.267',
     ', 22, корп.7, кв.61',
@@ -367,6 +429,7 @@ samples = [
     '70б, кв.52', '73, кв.110', '77, кв.48', '46, кв. 441', '127а/68',
 ]
 
+# import numpy as np
 # start = time.clock()
 # for s in samples:
 #     address = parse_build_number(s)
