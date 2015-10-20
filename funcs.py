@@ -259,6 +259,7 @@ def find_groups(addr):
     if apt:
         numeric_group_length += 1
     groups = delimited_groups if delimited_group_length > 0 and delimited_group_length < numeric_group_length else numeric_groups
+    groups = list(filter(bool, groups))
     if len(groups) > 0:
         build = only_digits(groups[0])
         groups[0] = build
@@ -429,14 +430,14 @@ samples = [
     '70б, кв.52', '73, кв.110', '77, кв.48', '46, кв. 441', '127а/68',
 ]
 
-# import numpy as np
-# start = time.clock()
-# for s in samples:
-#     address = parse_build_number(s)
-#     print(str(s) + ' ->> ' + str(address))
-#
-# print('time: ' + str(time.clock() - start))
-# print('sample size: ' + str(len(samples)))
+import numpy as np
+start = time.clock()
+for s in samples:
+    address = parse_build_number('49/73 // 724-81-66')
+    print(str(s) + ' ->> ' + str(address))
+
+print('time: ' + str(time.clock() - start))
+print('sample size: ' + str(len(samples)))
 
 
 def test():
